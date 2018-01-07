@@ -1,0 +1,113 @@
+#!/usr/bin/env php
+<?php
+  $oConfig = (object) [
+    'default_miner' => '10.2.1.114',
+    'cache_time' => '1 minute',
+  ];
+
+  $ip = (isset($argv[1])) ? $argv[1] : $oConfig->default_miner;
+
+  $aMiner = queryMiner($ip,$argv);
+
+  if (isset($argv[2])) {
+    $metric = $argv[2];
+    if ($metric == "GHS av" || $metric == "GHS 5s") {
+      $aMiner[$metric] = number_format($aMiner[$metric]/1000,2);
+    }
+    if ($metric == "RejectedPercent") {
+      $aMiner[$metric] = number_format($aMiner['Rejected'] / $aMiner['Accepted'],4);
+    }
+    echo $aMiner[$metric]."\n\n";
+    die();
+  } else {
+    echo " == Miner $ip Oveview ==\n";
+    foreach ($aMiner as $Metric => $Value) {
+      echo str_pad($Metric,23," ")."$Value\n";
+    }
+  }
+
+
+function queryMiner($ip,$argv) {
+  global $oConfig;
+  $sCacheFile = "/dev/shm/$ip.cache";
+  if (file_exists($sCacheFile) && filemtime($sCacheFile) > strtotime("-$oConfig->cache_time") && ( isset($argv[2]) && $argv[2] != 'nocache' ) && dirname(__FILE__) != '/root/bin/queryMiner') {
+    $sCache = file_get_contents($sCacheFile);
+  } else {
+    $ip.=':4028';
+    $api = new Api;
+    $summary = $api->command($ip, 'summary');
+    $stats = $api->command($ip, 'stats');
+    //$pools = $api->command($ip, 'pools');
+    //$coin = $api->command($ip, 'coin');
+    $sCache=serialize(array_merge($stats[0]['STATS'][1],$summary[0]['SUMMARY'][0]));
+
+    //print_r($stats);die();
+    file_put_contents($sCacheFile,$sCache);
+    chmod($sCacheFile,0666);
+    chown($sCacheFile,'zabbix');
+    chgrp($sCacheFile,'zabbix');
+  }
+
+  return unserialize($sCache);
+}
+
+class Api {
+
+  protected $socket = null;
+
+  public function connect($ip, $port) {
+    $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+
+    socket_set_option($socket, SOL_SOCKET, SO_SNDTIMEO, array('sec' => 10, 'usec' => 0));
+    socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, array('sec' => 10, 'usec' => 0));
+
+    $res = @socket_connect($socket, $ip, $port);
+    if(@socket_getpeername($socket, $ip)) {
+      return $socket;
+    } else {
+      return false;
+    }
+  }
+
+  public function command($miner, $cmd, $param = null) {
+    $json = [
+      'command' => $cmd,
+    ];
+
+    if($param !== null) {
+      $json['parameter'] = $param;
+    }
+
+    list($ip, $port) = explode(':', $miner);
+    $socket = $this->connect($ip, $port);
+
+    if($socket === false) {
+      return false;
+    }
+
+    socket_write($socket, json_encode($json), strlen(json_encode($json)));
+    $line = $this->read($socket);
+    socket_close($socket);
+
+    $line = str_replace('}{', '},{', $line);
+    //$line = str_replace('"Best Share"', '"best_share"', $line);
+    $return[] = json_decode($line, true);
+    return $return;
+  }
+
+  private function read($socket) {
+    $line = '';
+    while (true) {
+      $byte = socket_read($socket, 1);
+      if ($byte === false || $byte === '') {
+        break;
+      }
+      if ($byte === "\0") {
+        break;
+      }
+      $line .= $byte;
+    }
+    return $line;
+  }
+
+}
